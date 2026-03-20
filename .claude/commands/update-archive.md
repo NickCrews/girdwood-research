@@ -1,49 +1,88 @@
 You are maintaining the Girdwood Research Archive — a primary source archive for political, economic, and housing research on Girdwood, Alaska.
 
-## Your Task
+## Overview
 
-Check all known source URLs listed in `CLAUDE.md` for new or updated documents. Download any documents not yet in `index.json` and add them to the archive.
+This command runs in three phases. index.json acts as a shared TODO list: new entries are registered first (without file info), then subagents download and finalize them in parallel.
 
-## Step-by-Step Instructions
+---
 
-1. **Read the current archive state**
-   - Read `index.json` to see what's already archived (IDs, URLs, file hashes)
-   - Read `CLAUDE.md` to get the list of source URLs and their categories
+## Phase 1: Discovery
 
-2. **For each source URL in CLAUDE.md**:
-   - Fetch the page using WebFetch
-   - Identify linked documents (PDFs, etc.) that are not yet in `index.json`
-   - A document is "already archived" if its URL appears in an existing `index.json` entry
+For each source URL listed in `CLAUDE.md`:
 
-3. **For each new document found**:
+1. **Read `index.json`** to get the list of already-archived URLs.
 
-   a. **Determine the ID**: Use format `{YYYY-MM-DD}-{short-slug}` where the date is the original publication date (from the document or its filename/metadata). If the date is uncertain, use the best estimate and note it. Slugs should be lowercase, hyphenated, descriptive (e.g., `bos-minutes`, `ghec-packet`, `gap-chapter-1`).
+2. **Fetch the source page** using WebFetch.
 
-   b. **Create the source directory**: `sources/{id}/`
+3. **Identify linked documents** (PDFs, substantive HTML pages) that are not yet in `index.json`.
+   - A document is already archived if its URL appears in any existing entry's `url` field.
 
-   c. **Download the files**:
-      - For PDFs: Use `curl -L -o sources/{id}/original.pdf "{url}"` via Bash
-      - For HTML pages: Use WebFetch to get the content, save as `sources/{id}/original.html`, then convert to clean markdown and save as `sources/{id}/original.md`
-      - For pages that link to PDFs: Download the PDF; also save the index/listing page as `original.html` + `original.md` if it's substantive
+4. **For each new document found**, immediately add a skeleton entry to `index.json`:
 
-   d. **Compute SHA256 hashes** for each downloaded file:
-      ```
-      shasum -a 256 sources/{id}/original.pdf
-      ```
+   ```json
+   {
+     "id": "2024-01-15-bos-minutes",
+     "title": "Girdwood Board of Supervisors Minutes – January 15, 2024",
+     "category": "board-minutes",
+     "date_added": "2026-03-19",
+     "original_publication_date": "2024-01-15",
+     "url": "https://...",
+     "files": [],
+     "status": "pending",
+     "notes": ""
+   }
+   ```
 
-   e. **Add entry to index.json**: Insert a new entry into the `sources` array with all required fields. Keep the array sorted by `id` (which sorts chronologically by date prefix).
+   - **ID format**: `{YYYY-MM-DD}-{short-slug}` — use the document's original publication date, not today's
+   - If the date is uncertain, use your best estimate and note it in `notes`
+   - Keep entries sorted by `id` (chronological)
+   - Set `status: "pending"` — this signals that files haven't been downloaded yet
 
-4. **Update `index.json`**:
-   - Set `last_updated` to today's date (ISO format)
-   - Write the updated JSON back to `index.json`
+5. **Set `last_updated`** to today's date after all discovery is done.
 
-5. **Report what you did**: Summarize:
+Do not download any files during Phase 1. Just register the new entries and move on.
+
+---
+
+## Phase 2: Download (delegate to subagents)
+
+For each entry with `"status": "pending"` in `index.json`, **launch a subagent** to handle that entry. Subagents can run in parallel.
+
+Each subagent receives the source `id` and `url` and does the following:
+
+1. **Create the source directory**: `sources/{id}/`
+
+2. **Download the files**:
+   - For PDFs: `curl -L -o sources/{id}/original.pdf "{url}"`
+   - For HTML pages: Use WebFetch, save raw HTML as `sources/{id}/original.html`, then convert to clean markdown and save as `sources/{id}/original.md`
+   - For listing pages that link to PDFs: Download the PDF; also save the listing page as `original.html` + `original.md` if it contains substantive content
+
+3. **Run the finalize script** to compute SHA256 hashes and update `index.json`:
+
+   ```bash
+   node scripts/finalize-source.js {id}
+   ```
+
+   This script reads the downloaded files under `sources/{id}/`, computes their SHA256 hashes, and writes the `files` array into the entry in `index.json`. It also sets `"status": "done"`.
+
+4. **Update `notes`** in the entry if there is anything worth recording (e.g., date was estimated, page required login, file was redirected).
+
+---
+
+## Phase 3: Wrap-up
+
+After all subagents complete:
+
+1. Verify all entries that were `"pending"` at the start of this run are now `"done"`.
+2. Report a summary:
    - How many new sources were added
    - List each new source ID and title
-   - Note any sources you checked but found nothing new
-   - Note any errors or access issues
+   - Note any sources checked but found nothing new
+   - Note any errors or entries still in `"pending"` state
 
-## index.json Entry Format
+---
+
+## index.json Entry Format (final)
 
 ```json
 {
@@ -57,14 +96,17 @@ Check all known source URLs listed in `CLAUDE.md` for new or updated documents. 
     {"path": "sources/2024-01-15-bos-minutes/original.pdf", "filetype": "pdf", "sha256": "abc123..."},
     {"path": "sources/2024-01-15-bos-minutes/original.md", "filetype": "md", "sha256": "def456..."}
   ],
+  "status": "done",
   "notes": "Regular monthly meeting"
 }
 ```
 
-## Important Rules
+---
 
-- **Never re-download** a file that already has an entry in `index.json` with a matching URL
-- **Preserve existing entries** — only append new ones, never modify existing entries unless correcting an obvious error
-- **Use the date from the document** for the ID prefix, not today's date (unless the document has no date)
-- **Keep index.json valid JSON** — format it with 2-space indentation
+## Rules
+
+- **Never re-download** a file whose entry already has `status: "done"` in `index.json`
+- **Preserve existing entries** — only append new ones; never modify entries with `status: "done"` unless correcting an obvious error
+- **Use the document's date** for the ID prefix, not today's date (unless the document has no date)
+- **Keep index.json valid JSON** — format with 2-space indentation
 - **Do not commit** — just update files; the CI workflow handles committing
